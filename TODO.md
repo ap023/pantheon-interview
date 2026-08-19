@@ -8,20 +8,20 @@ checked off forever.
 
 ## Known gaps / bugs
 
-- [ ] A part consumed by a cell that doesn't finish `done` (over-takt,
-      logic fault, safety violation, or a refusal) is scrapped, not
-      retried or held for the next tick — `Line.tick()` pops it off the
-      upstream buffer the moment a cycle is attempted, regardless of
-      outcome, and only pushes it downstream on success. DESIGN.md
-      section 5's failure table doesn't actually specify a part's fate
-      for most of these rows ("scrapped or retried" is only stated for
-      task-outcome failures) — this was a build-time choice to keep
-      `Line.tick()` simple, not something section 5 mandated. Worth a
-      real decision later: over-takt in particular reads more like "still
-      in progress, ran out of time" than "destroyed," and a version of
-      `Cell` that could resume a cycle across tick boundaries (rather
-      than always finishing or timing out within one `run_cycle` call)
-      would change what "consumed" even means here.
+- [ ] Config isn't validated up front. `Cell.__init__` calls
+      `_resolve_config()` unguarded (no try/except), so a broken
+      `config/fleet_defaults.yaml` (malformed YAML, a missing required
+      field) crashes construction itself rather than becoming a refusal.
+      `run_cycle` re-resolves config every cycle wrapped in a broad
+      try/except, so a config that only goes bad *after* a Cell already
+      exists (live-edited mid-shift) fares better for some failure modes
+      (malformed YAML -> clean `config_unresolved` refusal) but not
+      others (a missing field read outside that try/except, e.g.
+      `takt_s`, still crashes `run_cycle` itself). Verified against real
+      `Cell`/`config.resolve()` — see `config/test_fixtures/README.md`
+      for the full breakdown and drop-in broken configs to reproduce
+      each case. Not fixed here: out of scope while only known-good
+      configs are being passed in.
 
 ## Backlog (not built yet)
 
@@ -41,6 +41,24 @@ checked off forever.
       calibration it replaced.
 - [ ] Multi-waypoint cycles (reach -> grasp -> move -> release) instead
       of a single target_qpos per `run_cycle` call.
+- [ ] DESIGN.md section 5's "logic fault (systematic)" row — no
+      consecutive-failure threshold tracking exists anywhere (e.g. "same
+      cell fails the same variant N times in a row -> stop attempting
+      that variant"). Every logic fault today is handled identically
+      (transient), regardless of how many times in a row it's happened.
+      Flagged while auditing config/test_fixtures/README.md against the
+      full failure table.
+- [ ] DESIGN.md section 5's "sensor dropout (mid-cycle)" row — no
+      simulated sensor exists that can actually drop out while a cycle
+      is running. `declared_sensors` is a static frozenset checked once,
+      pre-cycle; there's no dynamic sensor state to interrupt mid-cycle
+      the way a kill or velocity spike can. Same audit as above.
+- [ ] DESIGN.md section 5's "task outcome (clear)" row — only
+      "obstructing" (dropped *inside* the workspace, halts the cell) is
+      built. The "clear" variant (dropped *outside* the workspace/buffer
+      bounds — logged, part scrapped/retried, no halt) has no separate
+      code path; `obstruct()` doesn't distinguish the two. Same audit as
+      above.
 - [ ] Torque safety-violation check. Velocity is now wired in
       (`hardware_limits.max_joint_velocity`, checked every physics step);
       torque/force isn't — MuJoCo already physically clamps applied
@@ -64,20 +82,57 @@ checked off forever.
       deciding over-takt on its own for that to be true, which is a
       bigger change (see the `Cell` resume-across-ticks note above) than
       building the Line alone justified.
-- [ ] `task_input/` and `commands/` file-polling (task overrides and
-      fault injection, DESIGN.md sections 1b/1c). `Cell.obstruct()` /
-      `clear_failure()` exist now as direct method calls but aren't
-      wired to the `commands/` channel yet.
-- [ ] Site/per-unit layering for `config.py` (per-cell) and
-      `line_config.py` (per-edge/site) — both are single-layer
-      (fleet/line defaults only) stubs right now. Two separate
-      precedence chains, since they're two separate config surfaces
-      (DESIGN.md section 1a) — `config.resolve(cell_id)` and
-      `line_config.resolve(edge_id)` already take the right key for it,
-      just don't merge anything on top of the defaults layer yet.
+- [ ] `commands/` doesn't support a "change the Line's active variant"
+      command while running — `line.set_variant(...)` is a Python
+      method, no `commands/set_variant_{value}.json`-style file channel
+      exists to call it live. This is the reason DESIGN.md section 5's
+      "capability mismatch" / "sensor gone (pre-cycle)" refusal rows
+      aren't currently live-triggerable against a running
+      `line_runner` — both depend on which variant a part carries, and
+      that's Line-wide, not something the per-cell `task_input/` inbox
+      can already reach. Everything else needed to demonstrate it exists
+      (`variants.py`'s registry, the sensor/capability checks in
+      `Cell.run_cycle`) — just no way to flip the active variant from a
+      second terminal without editing Python directly.
+- [ ] `commands/` isn't a strict oldest-first FIFO queue across multiple
+      pending commands the way DESIGN.md originally discussed — `kill`,
+      `obstruct`, and `clear_failure` are each independently
+      check-and-consumed per cell per tick (`runtime/commands.py`), with
+      no explicit ordering guarantee if more than one lands between
+      polls. `recalibrate` still doesn't exist as a command at all
+      (blocked on `Cell.recalibrate()` itself not existing — see the
+      calibration item above).
+- [ ] Site/per-unit layering for `line_config.py` (per-edge/site) — still
+      a single-layer (line defaults only) stub. `config.py` (per-cell)
+      got its full fleet -> site -> per-unit chain built (DESIGN.md
+      section 2: field-by-field merge, provenance tags, tie-value rule)
+      — see `config/site_overrides/`, `config/per_unit/`. `line_config`
+      is the same shape of gap, just not done yet: `resolve(edge_id)`
+      already takes the right key, just doesn't merge anything on top of
+      line defaults.
 
 ## Low priority
 
+- [ ] Real tendon/gripper control. `controller.controlled_actuator_ids`
+      now excludes tendon-transmitted actuators (e.g. Panda's real
+      bundled gripper) from what `Cell` addresses at all, rather than
+      mis-addressing them (see resolved bug note in git history) — so
+      the gripper slot is simply untouched, not actually controllable.
+      Real gripper control needs its own transmission-aware path
+      (`actuator_trntype`-branching), not an extension of the
+      joint-only controller.
+- [ ] `Cell`'s demo `control_gain_kp=4.0` (config/fleet_defaults.yaml) is
+      tuned against the synthetic 2-joint test fixture, not real robot
+      dynamics — passing `robot_name="panda"` or `"ur5e"` to a `Cell`
+      wrapping the real menagerie models (now safe to do at all, since
+      the tendon-addressing crash is fixed) trips the velocity safety
+      check on the very first cycle, because the proportional step spikes
+      joint velocity past the datasheet limit before it can settle. Seen
+      when trying to enable the velocity check in
+      `multi_hardware_test.py`; left disabled there and in
+      `line_runner.py` (both omit `robot_name` for the real-hardware
+      cells) rather than tuned, since real gain tuning is out of scope for
+      this build.
 - [ ] Verify `hardware_limits.py`'s max joint velocity numbers against
       the actual manufacturer datasheets (Franka Emika Panda, Universal
       Robots UR5e) rather than the commonly-cited community values
