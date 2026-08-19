@@ -60,8 +60,9 @@ While it's running, drive faults and overrides from a second terminal:
 echo '{"target_qpos": [9, 9, 9, 9, 9, 9, 9]}' > task_input/task_cell_panda_001.json
 
 # commands, consumed once read
-touch commands/obstruct_cell_panda_001.json        # inject an obstruction
-touch commands/kill_cell_panda_001.json             # kill mid-cycle
+touch commands/obstruct_cell_panda_001.json        # inject an obstruction (halts until cleared)
+touch commands/kill_cell_panda_001.json             # kill mid-cycle (halts until cleared)
+touch commands/drop_clear_cell_panda_001.json       # part dropped OUTSIDE the workspace (one-shot failure, no halt)
 touch commands/clear_failure_cell_panda_001.json    # unhalt, drop active instruction
 ```
 
