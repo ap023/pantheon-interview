@@ -19,6 +19,8 @@ from typing import Dict
 
 import numpy as np
 
+from runtime.controller import require_joint_transmission
+
 # rad/s per joint, arm joints only (excludes the gripper actuator).
 # Panda: franka_description joint_limits.yaml convention (joints 1-4 slower
 # than 5-7). UR5e: e-Series datasheet, 180 deg/s uniform across all 6 joints.
@@ -38,11 +40,14 @@ def max_joint_velocity(robot_name: str) -> np.ndarray:
         )
 
 
-def actuated_position_range(model) -> np.ndarray:
-    """(nu, 2) min/max position per actuator, read from the model's own
-    joint definitions — this is the model's actual position limit, not a
-    duplicated constant."""
-    joint_ids = model.actuator_trnid[:, 0]
+def actuated_position_range(model, actuator_ids=None) -> np.ndarray:
+    """(len(actuator_ids), 2) min/max position per actuator (default: every
+    actuator, model.nu), read from the model's own joint definitions — this
+    is the model's actual position limit, not a duplicated constant."""
+    if actuator_ids is None:
+        actuator_ids = np.arange(model.nu)
+    require_joint_transmission(model, actuator_ids)
+    joint_ids = model.actuator_trnid[actuator_ids, 0]
     return model.jnt_range[joint_ids].copy()
 
 

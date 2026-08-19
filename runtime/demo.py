@@ -12,7 +12,7 @@ def main():
     cell = Cell("cell_panda_001", panda_mj_description.MJCF_PATH)
 
     start = cell.current_qpos()
-    ctrl_range = cell.model.actuator_ctrlrange
+    ctrl_range = cell.model.actuator_ctrlrange[cell.controlled_actuator_ids]
     target = np.clip(start + 0.5, ctrl_range[:, 0], ctrl_range[:, 1])
 
     print(f"start qpos:  {np.round(start, 3)}")

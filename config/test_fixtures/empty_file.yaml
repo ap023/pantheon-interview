@@ -1,0 +1,10 @@
+# Completely empty config file. yaml.safe_load(empty) returns None,
+# which config.py's `or {}` turns into an empty dict — no exception at
+# load time, so this is NOT caught by run_cycle's config-resolution
+# try/except (that only catches load/parse errors, not "loaded fine but
+# is missing everything"). Constructing a Cell directly against this
+# file crashes in __init__ (missing control_gain_kp); if it only
+# appears via a live edit after construction, the first cycle that
+# reads config["takt_s"] crashes there instead. Verified both ways —
+# see missing_control_gain_kp.yaml / missing_takt_s.yaml for the
+# specific failure each missing field produces.

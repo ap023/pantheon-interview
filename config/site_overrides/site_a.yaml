@@ -1,0 +1,18 @@
+# Site override — applies to every cell whose site_id="site_a", on top
+# of fleet_defaults.yaml (DESIGN.md section 2). Only the field(s) being
+# overridden need to be listed; every other field falls through to the
+# fleet default unless a per-unit file overrides it too.
+#
+# Example: site_a runs its takt slower than the fleet norm.
+takt_s: 5.0
+
+# DESIGN.md section 5, "Refusal — stale state": calibration expiring
+# under a running station is one of the faults Phase 3 explicitly asks
+# to be able to demonstrate. calibration_age_s() is measured from real
+# wall-clock time since the Cell was constructed (time.monotonic()), so
+# this doesn't need any live file edit to fire — it triggers on its own,
+# ~100s into any run using this site (the fleet default of 300s does the
+# same thing, just slower; this shortens it to something you can
+# actually watch land in a demo). Once it trips it refuses every cycle
+# forever — no recalibrate() exists yet to clear it (TODO.md).
+calibration_max_age_s: 100.0

@@ -1,0 +1,10 @@
+# Negative takt_s. Doesn't crash — max_steps = max(1, int(takt_s /
+# physics_dt)) floors at 1 step no matter how negative takt_s is — but
+# it silently degrades to a 1-physics-step budget, which will fail
+# over_takt on essentially any real target. A logically-wrong value
+# that reads as a normal refusal, not an obvious config error.
+takt_s: -5.0
+position_tolerance_rad: 0.05
+control_gain_kp: 4.0
+autoclear: false
+calibration_max_age_s: 300.0

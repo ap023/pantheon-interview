@@ -15,7 +15,7 @@ from runtime.line import (
 
 
 def fake_cell_config(takt_s=2.0, tolerance=0.05, kp=5.0):
-    def _resolve(cell_id):
+    def _resolve(cell_id, site_id=None):
         return {
             "takt_s": {"value": takt_s, "source": "fleet_default"},
             "position_tolerance_rad": {"value": tolerance, "source": "fleet_default"},
@@ -40,6 +40,7 @@ def noop_trigger():
 def isolate_records_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(records_module, "RECORDS_DIR", tmp_path / "records")
     monkeypatch.setattr(records_module, "CONFIG_SNAPSHOTS_DIR", tmp_path / "records" / "config_snapshots")
+    monkeypatch.setattr(records_module, "RUNS_DIR", tmp_path / "records" / "runs")
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +106,27 @@ def test_automatic_trigger_rejects_nonpositive_interval():
 # --- Starved / blocked readiness gating (DESIGN.md section 1a) ---
 
 
+def test_tick_indexes_every_ran_cell_into_the_run_directory(two_joint_mjcf_path):
+    """Each cycle a cell actually attempts gets symlinked under
+    records/runs/{line.run_id}/ (records.py's link_into_run) — proving
+    Line.tick() wires this up for real, not just that the helper works
+    in isolation (records_test.py already covers that)."""
+    cell_a = make_cell("cell_a", two_joint_mjcf_path)
+    cell_b = make_cell("cell_b", two_joint_mjcf_path)
+    line = Line(cells=[cell_a, cell_b], trigger=noop_trigger())
+
+    line.tick()  # cell_a runs, cell_b starves (not indexed — never attempted)
+    line.tick()  # cell_b runs too now
+
+    run_dir = records_module.RUNS_DIR / line.run_id
+    names = sorted(p.name for p in run_dir.iterdir())
+    assert names == [
+        "tick_0001_cell_a_success.json",
+        "tick_0002_cell_a_success.json",
+        "tick_0002_cell_b_success.json",
+    ]
+
+
 def test_single_cell_line_runs_every_tick_once_parts_are_flowing(two_joint_mjcf_path):
     # A cell is only starved relative to *its own* upstream buffer at the
     # instant of the tick snapshot — the Line releases a part into the
@@ -145,18 +167,50 @@ def test_downstream_cell_starves_until_upstream_completes_a_cycle(two_joint_mjcf
     assert b_result.outcome == "success"
 
 
-def test_upstream_cell_blocks_when_downstream_buffer_is_full(two_joint_mjcf_path):
+def test_upstream_cell_does_not_block_when_downstream_drains_the_same_tick(two_joint_mjcf_path):
+    """cell_b runs downstream-first within the same tick (see line.py's
+    tick() docstring), so if cell_b successfully pops buffers[1] this
+    tick, cell_a is free to push its own new part into that now-empty
+    slot in that same tick — no artificial one-tick "ping-pong" bubble
+    just because the buffer's capacity is 1."""
     cell_a = make_cell("cell_a", two_joint_mjcf_path)
     cell_b = make_cell("cell_b", two_joint_mjcf_path)
     line = Line(cells=[cell_a, cell_b], trigger=noop_trigger())
 
-    line.tick()  # cell_a produces into buffers[1]; cell_b starves (buffer size 1)
-    # buffers[1] is now full (occupancy 1, size 1) and cell_b hasn't
-    # consumed it yet at the top of tick 2 (it runs *during* tick 2), so
-    # cell_a should see its downstream buffer as blocked at this tick's
-    # snapshot and not attempt a cycle.
-    results = line.tick()
-    a_result = results[0]
+    line.tick()  # cell_a produces part_000 into buffers[1]; cell_b starves (buffer size 1)
+    results = line.tick()  # cell_b drains part_000 -> cell_a is unblocked, produces part_001
+    a_result, b_result = results
+    assert b_result.ran is True and b_result.outcome == "success"
+    assert a_result.ran is True and a_result.outcome == "success"
+    assert a_result.blocked is False
+
+
+def test_upstream_cell_blocks_when_downstream_fails_to_drain_this_tick(two_joint_mjcf_path, monkeypatch):
+    """The flip side: if cell_b's own cycle does NOT complete this tick
+    (a config that guarantees over_takt), it never pops buffers[1] — so
+    cell_a genuinely is blocked, exactly as before, just now provably
+    tied to cell_b's *actual* outcome this tick rather than a timing
+    artifact of read order."""
+    cell_a = make_cell("cell_a", two_joint_mjcf_path)
+    cell_b = make_cell("cell_b", two_joint_mjcf_path)
+
+    def resolve_per_cell(cell_id, site_id=None):
+        # cell_b gets an impossible takt (1 physics step) so it can
+        # never converge; cell_a gets a normal one.
+        takt_s = 0.002 if cell_id == "cell_b" else 2.0
+        return {
+            "takt_s": {"value": takt_s, "source": "fleet_default"},
+            "position_tolerance_rad": {"value": 0.05, "source": "fleet_default"},
+            "control_gain_kp": {"value": 5.0, "source": "fleet_default"},
+        }
+
+    monkeypatch.setattr(config_module, "resolve", resolve_per_cell)
+    line = Line(cells=[cell_a, cell_b], trigger=noop_trigger())
+
+    line.tick()  # cell_a produces part_000 into buffers[1]; cell_b starves
+    results = line.tick()  # cell_b attempts part_000, over-takts, never pops
+    a_result, b_result = results
+    assert b_result.ran is True and b_result.outcome == "failure" and b_result.reason == "over_takt"
     assert a_result.ran is False
     assert a_result.blocked is True
 
@@ -321,11 +375,12 @@ def test_a_single_part_advances_exactly_one_buffer_per_tick(two_joint_mjcf_path)
 
 
 def test_full_buffer_snapshot_across_three_ticks_of_a_three_cell_line(two_joint_mjcf_path):
-    """Same idea as the test above, but checking every buffer's contents
-    at once each tick, including the effect of a cell going blocked
-    (cell_0 sits out tick 2 because buffers[1] hasn't been drained yet —
-    it doesn't get to push part_001 forward just because buffers[0] is
-    occupied)."""
+    """Steady-state pipeline flow at buffer_size=1: every tick, every
+    part in flight advances exactly one buffer, and cell_0 runs EVERY
+    tick (never blocked) because downstream cells are processed first
+    within the same tick and free up room before cell_0's own blocked
+    check runs (see line.py's tick() docstring) — no one-tick "ping-
+    pong" bubble."""
     cells = [make_cell(f"cell_{i}", two_joint_mjcf_path) for i in range(3)]
     line = Line(cells=cells, trigger=noop_trigger())
 
@@ -336,18 +391,45 @@ def test_full_buffer_snapshot_across_three_ticks_of_a_three_cell_line(two_joint_
     assert snapshot() == [None, "part_000000", None, None]
 
     line.tick()
-    # cell_0 is blocked this tick (buffers[1] still held part_000 as of
-    # this tick's snapshot) — part_001 stays put in buffers[0] rather
-    # than advancing, while cell_1 drains part_000 into buffers[2].
-    assert snapshot() == ["part_000001", None, "part_000000", None]
+    # cell_1 drains part_000 into buffers[2] first (processed
+    # downstream-first); that frees buffers[1] in time for cell_0 to
+    # advance part_001 into it in this SAME tick — full throughput, not
+    # a bubble.
+    assert snapshot() == [None, "part_000001", "part_000000", None]
 
     line.tick()
-    # buffers[0] still holds part_001 at this tick's release (cell_0 was
-    # blocked last tick, so nothing was there to consume it) — release
-    # fails again, no part_002 yet. buffers[1] emptied last tick, so
-    # cell_0 is unblocked now and advances part_001 into it; cell_2
-    # advances part_000 from buffers[2] to the sink.
-    assert snapshot() == [None, "part_000001", None, "part_000000"]
+    # Same steady shift again: every part in flight moves forward
+    # exactly one buffer, cell_0 releases and advances part_002.
+    assert snapshot() == [None, "part_000002", "part_000001", "part_000000"]
+
+
+def test_sink_drains_into_completed_at_the_next_tick_boundary(two_joint_mjcf_path):
+    """The sink is the completion stage, not a holding buffer: a part
+    that reached it is collected into line.completed at the next tick's
+    start, so the last cell never blocks on finished goods. Without the
+    drain, size-1 buffers deadlock the whole line permanently after the
+    first completed part."""
+    cells = [make_cell("cell_a", two_joint_mjcf_path), make_cell("cell_b", two_joint_mjcf_path)]
+    line = Line(cells=cells, trigger=noop_trigger())
+
+    line.tick()  # part_000 through cell_a
+    line.tick()  # part_000 through cell_b -> sink
+    assert [p.id for p in line.sink.contents] == ["part_000000"]
+    assert line.completed == []
+
+    line.tick()
+    assert [p.id for p in line.completed] == ["part_000000"]
+    assert line.sink.starved or line.sink.peek().id != "part_000000"
+
+    # Steady state: the line keeps flowing instead of wedging — every
+    # released part eventually lands in completed, ids unique and in
+    # order.
+    for _ in range(8):
+        line.tick()
+    completed_ids = [p.id for p in line.completed]
+    assert len(completed_ids) == len(set(completed_ids))  # no duplicates
+    assert completed_ids == sorted(completed_ids)  # completion follows release order
+    assert len(completed_ids) >= 4  # still flowing, not deadlocked
 
 
 # --- run_shift ---

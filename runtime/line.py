@@ -9,12 +9,14 @@ another Cell; they only ever touch shared state (buffers, the current
 variant) through the Line.
 """
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
 
 import numpy as np
 
 from runtime import line_config as line_config_module
+from runtime import records as records_module
 from runtime import variants as variants_module
 from runtime.buffer import Buffer
 from runtime.cell import Cell
@@ -50,6 +52,16 @@ class TickResult:
     over_takt: bool
     outcome: Optional[str]  # "success" | "failure" | "refusal" | None if not attempted
     reason: Optional[str]
+    # Which part this cell was working on this tick (None when starved/
+    # blocked — no part was even picked up).
+    part_id: Optional[str] = None
+    # The actual takt-cycle numbers behind outcome/reason, not just the
+    # label: how much of the takt budget this attempt used. None/0 when
+    # not attempted (starved/blocked) or refused before physics ran.
+    tick_number: int = 0
+    takt_s: float = 0.0
+    sim_steps: int = 0
+    duration_s: float = 0.0
 
 
 class TickTrigger:
@@ -105,8 +117,18 @@ def _default_target_qpos(cell: Cell, part: Part) -> np.ndarray:
     physics. Swap it via Line(..., target_qpos_fn=...).
     """
     start = cell.current_qpos()
-    ctrl_range = cell.model.actuator_ctrlrange
-    return np.clip(start + 0.5, ctrl_range[:, 0], ctrl_range[:, 1])
+    ids = cell.controlled_actuator_ids
+    ctrl_range = cell.model.actuator_ctrlrange[ids]
+    joint_range = cell.model.jnt_range[cell.model.actuator_trnid[ids, 0]]
+    # Clip to the joint range as well as ctrlrange: the nudge is relative
+    # to wherever the arm currently is, so over many cycles it compounds
+    # toward the workspace edge — without the joint-range clip it walks
+    # straight past the physical limit and every later cycle becomes a
+    # logic_fault (observed empirically). Clipped, it saturates at the
+    # limit instead and cycles keep succeeding.
+    lo = np.maximum(ctrl_range[:, 0], joint_range[:, 0])
+    hi = np.minimum(ctrl_range[:, 1], joint_range[:, 1])
+    return np.clip(start + 0.5, lo, hi)
 
 
 class Line:
@@ -146,6 +168,23 @@ class Line:
 
         self.tick_count = 0
         self._next_part_seq = 0
+        # One id per Line instance/shift — every cycle record from any
+        # cell during this run gets indexed under records/runs/{run_id}/
+        # (see records.link_into_run), so "what happened this run" is
+        # one directory listing instead of hunting per-cell dirs keyed
+        # by random cycle_id. Timestamp prefix keeps runs sortable by
+        # `ls`; the uuid suffix disambiguates two runs started in the
+        # same second.
+        self.run_id = f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        # Parts that have left the line through the sink, in completion
+        # order. The sink is the completion/output stage (DESIGN.md
+        # section 1a), not a holding buffer — it's drained into this
+        # list at the start of every tick, so finished parts never exert
+        # backpressure on the last cell. (With the default size-1
+        # buffers, leaving them in the sink would deadlock the entire
+        # line permanently after the first completed part — observed
+        # empirically before this drain existed.)
+        self.completed: List[Part] = []
 
     def _edge_id(self, index: int) -> str:
         """index 0 is the source edge (release point -> cells[0]); index
@@ -213,42 +252,64 @@ class Line:
         1. Blocks on self.trigger.wait() — the only thing manual vs.
            automatic mode changes (DESIGN.md section 1c).
         2. Releases one new part into the source buffer.
-        3. Snapshots starved/blocked for every cell off buffer state
-           taken at this one instant, before any cell runs — decisions
-           for this tick are made off one consistent snapshot, not off
-           buffers a neighboring cell mutates mid-pass (section 1a: "all
-           cells run on the same shared takt clock, so cycles start in
-           lockstep").
-        4. Runs one cycle for every cell that's neither starved nor
-           blocked, reads its `done` flag at this tick boundary as the
-           source of truth for over-takt (section 3 / TODO.md), and
-           advances the part into the downstream buffer on success.
+        3. Snapshots starved for every cell off buffer state taken at
+           this one instant, before any cell runs — a cell's upstream
+           readiness is decided off one consistent pre-tick snapshot,
+           same as always (section 1a: "all cells run on the same
+           shared takt clock, so cycles start in lockstep").
+        4. Runs each cell's cycle **downstream cell first**, and reads
+           `blocked` live rather than off a pre-tick snapshot. This is
+           what makes steady per-tick throughput possible even at
+           buffer_size=1, instead of every other tick wasted as a
+           "ping-pong" bubble: by the time an upstream cell checks
+           whether its output slot is blocked, its downstream neighbor
+           has already popped that same slot THIS tick if it was going
+           to. This mirrors how a real synchronous pipeline (or a
+           hardware shift register) gets full throughput out of
+           capacity-1 stages — the read and the write on either side of
+           one buffer commit on the same clock edge, not one tick apart.
+           It does not weaken the "lockstep" rule: a cell's own
+           readiness (starved) is still fixed from the one pre-tick
+           snapshot in step 3, unaffected by processing order; only
+           `blocked` — which is about a *neighbor's* state, not the
+           cell's own — needs to reflect what that neighbor is doing
+           this same tick to avoid an artificial one-tick delay.
         """
         self.trigger.wait()
         self.tick_count += 1
+
+        # Collect finished goods off the sink first — they left the
+        # line at the previous tick boundary; the last cell must never
+        # read the sink as blocked because of parts that are already
+        # done (see self.completed).
+        while not self.sink.starved:
+            self.completed.append(self.sink.pop())
+
         self._release_part()
 
         starved_snapshot = [self.buffers[i].starved for i in range(len(self.cells))]
-        blocked_snapshot = [self.buffers[i + 1].blocked for i in range(len(self.cells))]
 
-        results: List[TickResult] = []
-        for i, cell in enumerate(self.cells):
+        results: List[Optional[TickResult]] = [None] * len(self.cells)
+        for i in reversed(range(len(self.cells))):
+            cell = self.cells[i]
             starved = starved_snapshot[i]
-            blocked = blocked_snapshot[i]
+            # Live, not snapshotted: any cell downstream of i has
+            # already been processed (we're going in reverse), so if it
+            # popped buffers[i + 1] this tick, that's reflected here.
+            blocked = self.buffers[i + 1].blocked
             if starved or blocked:
                 # Not attempted at all, not even a refusal — a refusal is
                 # a cell's own decision, starvation/blockage here is its
                 # neighbor's fault (section 1a readiness rule).
-                results.append(
-                    TickResult(
-                        cell_id=cell.cell_id,
-                        ran=False,
-                        starved=starved,
-                        blocked=blocked,
-                        over_takt=False,
-                        outcome=None,
-                        reason=None,
-                    )
+                results[i] = TickResult(
+                    cell_id=cell.cell_id,
+                    ran=False,
+                    starved=starved,
+                    blocked=blocked,
+                    over_takt=False,
+                    outcome=None,
+                    reason=None,
+                    tick_number=self.tick_count,
                 )
                 continue
 
@@ -265,6 +326,7 @@ class Line:
             part = self.buffers[i].peek()
             target_qpos = self._target_qpos_fn(cell, part)
             record = cell.run_cycle(target_qpos, part_id=part.id, variant=part.variant)
+            records_module.link_into_run(self.run_id, self.tick_count, cell.cell_id, record.cycle_id, record.outcome)
 
             if cell.done:
                 self.buffers[i].pop()
@@ -278,16 +340,19 @@ class Line:
             # flagged there as the redundant half still to collapse.
             over_takt = not cell.done and record.reason == "over_takt"
 
-            results.append(
-                TickResult(
-                    cell_id=cell.cell_id,
-                    ran=True,
-                    starved=False,
-                    blocked=False,
-                    over_takt=over_takt,
-                    outcome=record.outcome,
-                    reason=record.reason,
-                )
+            results[i] = TickResult(
+                cell_id=cell.cell_id,
+                ran=True,
+                starved=False,
+                blocked=False,
+                over_takt=over_takt,
+                outcome=record.outcome,
+                reason=record.reason,
+                part_id=part.id,
+                tick_number=self.tick_count,
+                takt_s=record.takt_s,
+                sim_steps=record.sim_steps,
+                duration_s=record.duration_s,
             )
 
         return results

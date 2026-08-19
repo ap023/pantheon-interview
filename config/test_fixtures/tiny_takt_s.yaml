@@ -1,0 +1,10 @@
+# Extremely tight but valid takt_s — realistic "site override sets an
+# unreachable takt" case, unlike negative_takt_s.yaml's outright-invalid
+# value. 0.01s / 0.002s physics_dt = 5 steps: far too few for a
+# proportional controller to converge from any nontrivial start. Every
+# cycle reports over_takt, cleanly, no crash.
+takt_s: 0.01
+position_tolerance_rad: 0.05
+control_gain_kp: 4.0
+autoclear: false
+calibration_max_age_s: 300.0

@@ -1,0 +1,13 @@
+# DESIGN.md section 5, "Refusal — stale state": calibration expired, or
+# predicted to expire within this cycle. calibration_max_age_s this low
+# means calibration_age_s() + takt_s crosses the threshold almost
+# immediately — every cycle refuses with reason="calibration_stale".
+# Verified against a real Cell.
+#
+# Note: there's currently no recalibrate() to clear this once tripped
+# (TODO.md known gap) — it refuses every cycle forever, not just once.
+takt_s: 5.0
+position_tolerance_rad: 0.05
+control_gain_kp: 4.0
+autoclear: false
+calibration_max_age_s: 0.001

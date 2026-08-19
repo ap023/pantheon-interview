@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from runtime.controller import controlled_actuator_ids
 from runtime.hardware_limits import (
     actuated_position_range,
     actuated_torque_range,
@@ -30,3 +31,14 @@ def test_actuated_position_range_follows_actuator_order(two_joint_model):
 def test_actuated_torque_range_matches_model(two_joint_model):
     result = actuated_torque_range(two_joint_model)
     np.testing.assert_allclose(result, two_joint_model.actuator_forcerange)
+
+
+def test_actuated_position_range_raises_if_tendon_actuator_addressed(tendon_model):
+    with pytest.raises(ValueError, match="joint transmission"):
+        actuated_position_range(tendon_model)
+
+
+def test_actuated_position_range_with_controlled_ids_skips_tendon_actuator(tendon_model):
+    ids = controlled_actuator_ids(tendon_model)
+    result = actuated_position_range(tendon_model, ids)
+    assert result.shape == (2, 2)

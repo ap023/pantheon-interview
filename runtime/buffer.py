@@ -25,6 +25,13 @@ class Buffer:
         return len(self._queue)
 
     @property
+    def contents(self) -> tuple:
+        """Snapshot of the queued items, upstream-first. Read-only view
+        for status displays (line_runner's board) — mutation still goes
+        through push/pop only."""
+        return tuple(self._queue)
+
+    @property
     def starved(self) -> bool:
         """No part available — a cell reading this as its upstream
         buffer can't run a cycle (DESIGN.md section 1a readiness rule)."""

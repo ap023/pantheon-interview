@@ -1,0 +1,21 @@
+# DESIGN.md section 5, "Failure — safety violation": velocity exceeds a
+# defined threshold -> hard stop, cell pulled out immediately. An
+# aggressive control_gain_kp makes the very first physics step spike
+# joint velocity past the datasheet limit. Verified against a real
+# Panda Cell.
+#
+# IMPORTANT — config alone is not enough to trigger this one: the
+# velocity check only runs when the Cell was constructed with
+# robot_name set (hardware_limits.max_joint_velocity has no entry to
+# check against otherwise, so the check is skipped entirely). robot_name
+# is a Cell constructor argument, not a config field — no YAML file can
+# set it. line_runner.py currently omits robot_name for exactly this
+# reason (see TODO.md: the fleet-default kp already isn't tuned for real
+# dynamics). To actually see this fire, construct the Cell yourself with
+# robot_name="panda" (or "ur5e") while this file is active — see
+# config/test_fixtures/README.md.
+takt_s: 5.0
+position_tolerance_rad: 0.05
+control_gain_kp: 500.0
+autoclear: false
+calibration_max_age_s: 300.0

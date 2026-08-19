@@ -1,0 +1,14 @@
+# Broken YAML syntax — unbalanced brackets. yaml.safe_load() itself
+# raises. Behavior depends on WHEN you point config at this file:
+#   - Cell("...") constructed against it directly -> Cell.__init__ calls
+#     _resolve_config() unguarded (no try/except) -> uncaught
+#     yaml.YAMLError, construction itself crashes.
+#   - An already-running Cell whose config file gets corrupted live
+#     (this file swapped in after construction) -> run_cycle's broad
+#     try/except around _resolve_config() DOES catch it -> a clean
+#     "config_unresolved: ..." refusal, no crash.
+# Verified both ways — see the demo command in
+# config/test_fixtures/README.md.
+takt_s: 4.0
+position_tolerance_rad: [0.05
+control_gain_kp: 4.0

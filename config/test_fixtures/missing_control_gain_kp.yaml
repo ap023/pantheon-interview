@@ -1,0 +1,13 @@
+# Missing control_gain_kp. Cell.__init__ reads
+# config["control_gain_kp"]["value"] directly (unguarded, no .get, no
+# try/except around it) to build the controller — so a Cell can't even
+# be constructed against this config; it raises KeyError before any
+# cycle, refusal, or record exists at all. (If this file only appeared
+# AFTER a Cell was already constructed with a valid config, run_cycle's
+# own read of config["control_gain_kp"] never happens post-construction
+# — the kp value is fixed at __init__ time — so a live edit to this
+# specific field wouldn't even be noticed until the process restarts.)
+takt_s: 4.0
+position_tolerance_rad: 0.05
+autoclear: false
+calibration_max_age_s: 300.0

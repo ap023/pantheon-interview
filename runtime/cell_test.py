@@ -3,6 +3,7 @@ import time
 import numpy as np
 import pytest
 
+from runtime import commands
 from runtime import config as config_module
 from runtime import hardware_limits
 from runtime import records as records_module
@@ -11,7 +12,7 @@ from runtime.cell import Cell
 
 
 def fake_resolve(takt_s, tolerance, kp):
-    def _resolve(cell_id):
+    def _resolve(cell_id, site_id=None):
         return {
             "takt_s": {"value": takt_s, "source": "fleet_default"},
             "position_tolerance_rad": {"value": tolerance, "source": "fleet_default"},
@@ -25,6 +26,14 @@ def fake_resolve(takt_s, tolerance, kp):
 def isolate_records_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(records_module, "RECORDS_DIR", tmp_path / "records")
     monkeypatch.setattr(records_module, "CONFIG_SNAPSHOTS_DIR", tmp_path / "records" / "config_snapshots")
+
+
+@pytest.fixture(autouse=True)
+def isolate_commands_dir(tmp_path, monkeypatch):
+    commands_dir = tmp_path / "commands"
+    commands_dir.mkdir()
+    monkeypatch.setattr(commands, "COMMANDS_DIR", commands_dir)
+    return commands_dir
 
 
 def test_run_cycle_succeeds_when_target_reachable_within_takt(two_joint_mjcf_path, monkeypatch):
@@ -156,7 +165,7 @@ def test_two_cells_over_consecutive_ticks_produce_independent_outcomes(two_joint
 
 
 def fake_resolve_with_autoclear(autoclear, takt_s=2.0, tolerance=0.05, kp=5.0):
-    def _resolve(cell_id):
+    def _resolve(cell_id, site_id=None):
         return {
             "takt_s": {"value": takt_s, "source": "fleet_default"},
             "position_tolerance_rad": {"value": tolerance, "source": "fleet_default"},
@@ -229,7 +238,7 @@ def test_config_unresolved_produces_a_refusal_not_a_crash(two_joint_mjcf_path, m
 
 
 def fake_resolve_with_calibration_max_age(max_age_s, takt_s=2.0, tolerance=0.05, kp=5.0):
-    def _resolve(cell_id):
+    def _resolve(cell_id, site_id=None):
         return {
             "takt_s": {"value": takt_s, "source": "fleet_default"},
             "position_tolerance_rad": {"value": tolerance, "source": "fleet_default"},
@@ -500,3 +509,164 @@ def test_no_velocity_check_when_robot_name_is_unknown(two_joint_mjcf_path, monke
     record = cell.run_cycle(np.array([0.1, 0.1]))
 
     assert record.outcome == "success"
+
+
+# --- In-cycle fault (mid-cycle kill) ---
+
+
+def test_kill_mid_cycle_aborts_with_partial_steps_and_in_cycle_fault(
+    two_joint_mjcf_path, monkeypatch, isolate_commands_dir
+):
+    monkeypatch.setattr(config_module, "resolve", fake_resolve(takt_s=2.0, tolerance=0.001, kp=1.0))
+    cell = Cell("cell_kill", str(two_joint_mjcf_path))
+
+    # Dropped before run_cycle starts, same as a file already sitting in
+    # commands/ when a cycle begins — the per-step loop still catches it
+    # on the very first iteration, since it's checked every step.
+    (isolate_commands_dir / "kill_cell_kill.json").write_text("{}")
+
+    # A tight tolerance with a weak controller means this would normally
+    # take many steps (or time out) — aborting after 1 proves the kill
+    # actually interrupted it early, not that it happened to finish fast.
+    record = cell.run_cycle(np.array([0.5, 0.5]))
+
+    assert record.outcome == "failure"
+    assert record.reason == "in_cycle_fault: killed mid-cycle"
+    assert record.sim_steps == 1  # partial, not zero — distinguishes this from a refusal
+    assert cell.done is False
+    # A kill halts the cell (DESIGN.md section 5: "Cell dies mid-cycle")
+    # — same hard-stop posture as obstruct()/safety_violation, not a
+    # transient miss that silently clears itself next tick.
+    assert cell.halted is True
+    assert cell.halt_reason == "in_cycle_fault: killed mid-cycle"
+
+
+def test_kill_halts_the_cell_until_explicitly_cleared(
+    two_joint_mjcf_path, monkeypatch, isolate_commands_dir
+):
+    monkeypatch.setattr(config_module, "resolve", fake_resolve(takt_s=2.0, tolerance=0.05, kp=5.0))
+    cell = Cell("cell_kill_recover", str(two_joint_mjcf_path))
+    (isolate_commands_dir / "kill_cell_kill_recover.json").write_text("{}")
+
+    killed = cell.run_cycle(np.array([0.1, 0.1]))
+    assert killed.outcome == "failure"
+    assert killed.reason.startswith("in_cycle_fault")
+    assert not (isolate_commands_dir / "kill_cell_kill_recover.json").exists()  # one-shot, consumed
+
+    # Killed was one-shot and already consumed, but the cell stays
+    # halted from it — the next cycle is refused, not retried.
+    still_halted = cell.run_cycle(np.array([0.1, 0.1]))
+    assert still_halted.outcome == "refusal"
+    assert still_halted.reason == "in_cycle_fault: killed mid-cycle"
+
+    # Only an explicit clear_failure() brings it back.
+    cell.clear_failure()
+    recovered = cell.run_cycle(np.array([0.1, 0.1]))
+    assert recovered.outcome == "success"
+
+
+def test_kill_file_for_a_different_cell_does_not_affect_this_one(
+    two_joint_mjcf_path, monkeypatch, isolate_commands_dir
+):
+    monkeypatch.setattr(config_module, "resolve", fake_resolve(takt_s=2.0, tolerance=0.05, kp=5.0))
+    cell = Cell("cell_kill_unaffected", str(two_joint_mjcf_path))
+    (isolate_commands_dir / "kill_some_other_cell.json").write_text("{}")
+
+    record = cell.run_cycle(np.array([0.1, 0.1]))
+
+    assert record.outcome == "success"
+
+
+# --- Task outcome (clear): part dropped outside workspace, no halt ---
+
+
+def test_drop_clear_fails_this_cycle_without_halting(two_joint_mjcf_path, monkeypatch, isolate_commands_dir):
+    monkeypatch.setattr(config_module, "resolve", fake_resolve(takt_s=2.0, tolerance=0.05, kp=5.0))
+    cell = Cell("cell_drop_clear", str(two_joint_mjcf_path))
+    (isolate_commands_dir / "drop_clear_cell_drop_clear.json").write_text("{}")
+
+    dropped = cell.run_cycle(np.array([0.1, 0.1]), part_id="p1")
+    assert dropped.outcome == "failure"
+    assert dropped.reason == "task_outcome_clear: part dropped outside workspace/buffer bounds"
+    assert dropped.sim_steps == 0
+    assert cell.halted is False  # unlike obstruct(), this doesn't halt
+    assert not (isolate_commands_dir / "drop_clear_cell_drop_clear.json").exists()  # one-shot, consumed
+
+    # No clear_failure() needed — the very next cycle just runs.
+    recovered = cell.run_cycle(np.array([0.1, 0.1]), part_id="p2")
+    assert recovered.outcome == "success"
+
+
+# --- Logic fault (systematic): N consecutive logic faults for one variant ---
+
+
+def test_systematic_logic_fault_trips_after_default_threshold_and_stops_attempting(
+    two_joint_mjcf_path, monkeypatch
+):
+    monkeypatch.setattr(config_module, "resolve", fake_resolve(takt_s=2.0, tolerance=0.05, kp=5.0))
+    cell = Cell("cell_systematic", str(two_joint_mjcf_path))
+    bad_target = np.array([50.0, 50.0])  # out of joint range every time
+
+    r1 = cell.run_cycle(bad_target, variant="default")
+    r2 = cell.run_cycle(bad_target, variant="default")
+    r3 = cell.run_cycle(bad_target, variant="default")
+    for r in (r1, r2, r3):
+        assert r.outcome == "failure" and r.reason.startswith("logic_fault:")
+
+    # 4th time in a row: the streak (default threshold 3) trips — a
+    # refusal now, without even re-checking the target, and the cell
+    # was never halted for it (only that variant stops).
+    r4 = cell.run_cycle(bad_target, variant="default")
+    assert r4.outcome == "refusal"
+    assert r4.reason.startswith("logic_fault_systematic:")
+    assert cell.halted is False
+
+
+def test_systematic_logic_fault_streak_is_per_variant(two_joint_mjcf_path, monkeypatch):
+    monkeypatch.setattr(config_module, "resolve", fake_resolve(takt_s=2.0, tolerance=0.05, kp=5.0))
+    cell = Cell("cell_systematic_variants", str(two_joint_mjcf_path), capable_variants=frozenset({"default"}))
+    bad_target = np.array([50.0, 50.0])
+
+    for _ in range(4):
+        cell.run_cycle(bad_target, variant="default")
+    stopped = cell.run_cycle(bad_target, variant="default")
+    assert stopped.outcome == "refusal" and stopped.reason.startswith("logic_fault_systematic:")
+
+    # A different variant's own streak is untouched by "default"'s.
+    other = cell.run_cycle(np.array([0.1, 0.1]), variant="vision_pick")
+    assert other.reason != stopped.reason
+    assert not other.reason.startswith("logic_fault_systematic")
+
+
+def test_systematic_logic_fault_streak_resets_on_success(two_joint_mjcf_path, monkeypatch):
+    monkeypatch.setattr(config_module, "resolve", fake_resolve(takt_s=2.0, tolerance=0.05, kp=5.0))
+    cell = Cell("cell_systematic_reset", str(two_joint_mjcf_path))
+    bad_target = np.array([50.0, 50.0])
+
+    cell.run_cycle(bad_target)
+    cell.run_cycle(bad_target)
+    recovered = cell.run_cycle(np.array([0.1, 0.1]))  # a normal success in between
+    assert recovered.outcome == "success"
+
+    # Streak reset by the success — two more bad cycles shouldn't trip
+    # the threshold (would need 3 fresh consecutive failures again).
+    r1 = cell.run_cycle(bad_target)
+    r2 = cell.run_cycle(bad_target)
+    assert r1.outcome == "failure" and r1.reason.startswith("logic_fault:")
+    assert r2.outcome == "failure" and r2.reason.startswith("logic_fault:")
+
+
+def test_systematic_fault_threshold_is_configurable(two_joint_mjcf_path, monkeypatch):
+    def resolve_with_threshold(cell_id, site_id=None):
+        d = fake_resolve(takt_s=2.0, tolerance=0.05, kp=5.0)(cell_id, site_id)
+        d["systematic_fault_threshold"] = {"value": 1, "source": "fleet_default"}
+        return d
+
+    monkeypatch.setattr(config_module, "resolve", resolve_with_threshold)
+    cell = Cell("cell_systematic_threshold_1", str(two_joint_mjcf_path))
+    bad_target = np.array([50.0, 50.0])
+
+    r1 = cell.run_cycle(bad_target)
+    assert r1.outcome == "failure" and r1.reason.startswith("logic_fault:")
+    r2 = cell.run_cycle(bad_target)  # threshold=1 means the very next attempt already trips
+    assert r2.outcome == "refusal" and r2.reason.startswith("logic_fault_systematic:")

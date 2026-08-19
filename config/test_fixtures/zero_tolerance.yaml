@@ -1,0 +1,10 @@
+# position_tolerance_rad: 0.0 — the convergence check is
+# `np.max(np.abs(error)) < tolerance`, a strict less-than, so an exact
+# 0.0 tolerance can never be satisfied by floating point convergence.
+# Every cycle runs its full step budget and reports over_takt, even for
+# a trivial target right next to the arm's current position.
+takt_s: 4.0
+position_tolerance_rad: 0.0
+control_gain_kp: 4.0
+autoclear: false
+calibration_max_age_s: 300.0

@@ -1,0 +1,12 @@
+# Missing takt_s. Cell CAN be constructed (control_gain_kp is present,
+# which is all __init__ needs) — but run_cycle reads
+# config["takt_s"]["value"] directly, right after the config-resolution
+# try/except block has already exited. That read is unguarded, so this
+# raises KeyError as an uncaught exception out of run_cycle itself — a
+# real crash, not a refusal — whether the cell was constructed against
+# this file directly, or it only appeared later via a live config edit.
+# Verified both ways.
+control_gain_kp: 4.0
+position_tolerance_rad: 0.05
+autoclear: false
+calibration_max_age_s: 300.0

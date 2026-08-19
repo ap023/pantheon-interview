@@ -1,0 +1,7 @@
+# Per-unit correction — applies only to the cell whose cell_id matches
+# this filename, on top of fleet defaults and (if any) its site
+# override (DESIGN.md section 2). Highest-precedence layer.
+#
+# Example: this specific Panda has a slightly looser tolerance than
+# either the fleet default or its site.
+position_tolerance_rad: 0.08

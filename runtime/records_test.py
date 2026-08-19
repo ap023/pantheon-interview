@@ -3,13 +3,14 @@ import json
 import pytest
 
 from runtime import records as records_module
-from runtime.records import CycleRecord, hash_config, write_cycle_record
+from runtime.records import CycleRecord, hash_config, link_into_run, read_config_snapshot, write_cycle_record
 
 
 @pytest.fixture(autouse=True)
 def isolate_records_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(records_module, "RECORDS_DIR", tmp_path / "records")
     monkeypatch.setattr(records_module, "CONFIG_SNAPSHOTS_DIR", tmp_path / "records" / "config_snapshots")
+    monkeypatch.setattr(records_module, "RUNS_DIR", tmp_path / "records" / "runs")
 
 
 def make_record(cell_id="cell_x", cycle_id="cycle-1", outcome="success", config=None):
@@ -67,3 +68,39 @@ def test_different_configs_produce_different_snapshots():
 
     snapshots = list(records_module.CONFIG_SNAPSHOTS_DIR.glob("*.json"))
     assert len(snapshots) == 2
+
+
+def test_read_config_snapshot_reverses_hash_config(tmp_path):
+    config = {"takt_s": {"value": 4.0, "source": "fleet_default"}}
+    write_cycle_record(make_record(config=config))
+
+    assert read_config_snapshot(hash_config(config)) == config
+
+
+def test_read_config_snapshot_raises_for_unknown_hash():
+    with pytest.raises(FileNotFoundError):
+        read_config_snapshot("0" * 16)
+
+
+def test_link_into_run_symlinks_to_the_canonical_record():
+    record = make_record(cell_id="cell_a", cycle_id="cycle-1", outcome="success")
+    write_cycle_record(record)
+
+    link_path = link_into_run("run_123", tick_number=1, cell_id="cell_a", cycle_id="cycle-1", outcome="success")
+
+    assert link_path.name == "tick_0001_cell_a_success.json"
+    assert link_path.is_symlink()
+    assert json.loads(link_path.read_text())["cycle_id"] == "cycle-1"
+
+
+def test_link_into_run_orders_by_tick_then_cell_when_listed(tmp_path):
+    for tick, cell_id, cycle_id in [(1, "cell_a", "c1"), (2, "cell_b", "c2"), (1, "cell_b", "c3")]:
+        write_cycle_record(make_record(cell_id=cell_id, cycle_id=cycle_id))
+        link_into_run("run_abc", tick_number=tick, cell_id=cell_id, cycle_id=cycle_id, outcome="success")
+
+    names = sorted(p.name for p in (records_module.RUNS_DIR / "run_abc").iterdir())
+    assert names == [
+        "tick_0001_cell_a_success.json",
+        "tick_0001_cell_b_success.json",
+        "tick_0002_cell_b_success.json",
+    ]
