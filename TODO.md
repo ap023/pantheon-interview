@@ -8,7 +8,20 @@ checked off forever.
 
 ## Known gaps / bugs
 
-(none open right now)
+- [ ] A part consumed by a cell that doesn't finish `done` (over-takt,
+      logic fault, safety violation, or a refusal) is scrapped, not
+      retried or held for the next tick — `Line.tick()` pops it off the
+      upstream buffer the moment a cycle is attempted, regardless of
+      outcome, and only pushes it downstream on success. DESIGN.md
+      section 5's failure table doesn't actually specify a part's fate
+      for most of these rows ("scrapped or retried" is only stated for
+      task-outcome failures) — this was a build-time choice to keep
+      `Line.tick()` simple, not something section 5 mandated. Worth a
+      real decision later: over-takt in particular reads more like "still
+      in progress, ran out of time" than "destroyed," and a version of
+      `Cell` that could resume a cycle across tick boundaries (rather
+      than always finishing or timing out within one `run_cycle` call)
+      would change what "consumed" even means here.
 
 ## Backlog (not built yet)
 
@@ -39,22 +52,18 @@ checked off forever.
       against the model's *true* joint range only
       (`hardware_limits.actuated_position_range`) — there's no config
       field for a tighter, deployment-specific bound.
-- [ ] Line should read `Cell.done` at shared tick boundaries as the
-      actual source of truth for over-takt, per DESIGN.md section 3.
-      `done` now exists as real state (false at cycle start, true on
-      completion), but `run_cycle` still also decides over-takt
-      internally by comparing its own step count to budget — that's
-      redundant with `done` and should collapse once the Line exists to
-      be the one reading it.
-- [ ] Line: takt clock, topology, variant registry, part release
-      (DESIGN.md section 1). Includes a `Part` record — bare id only,
-      passed along the chain of cells as it moves through the line —
-      that the Line releases at each takt tick. Decided: no physically
-      simulated box for now, just the id; today's "success" stays pure
-      joint-space convergence, nothing checks whether a simulated object
-      was actually grasped or moved. `Buffer` (runtime/buffer.py) is
-      already built standalone and usable in tests, but nothing owns or
-      wires one per edge yet — that's still the Line's job.
+- [ ] `Line.tick()` (runtime/line.py) now reads `Cell.done` at the tick
+      boundary as the real over-takt signal, per DESIGN.md section 3 —
+      but `run_cycle` still also decides over-takt internally by
+      comparing its own step count to budget, and `TickResult.over_takt`
+      currently reads `record.reason == "over_takt"` (set by that same
+      internal decision) rather than purely off `done`. The two happen
+      to always agree today because they're driven by the same
+      `self.done = reached` line inside `run_cycle`, but the redundancy
+      itself hasn't actually collapsed — `run_cycle` would need to stop
+      deciding over-takt on its own for that to be true, which is a
+      bigger change (see the `Cell` resume-across-ticks note above) than
+      building the Line alone justified.
 - [ ] `task_input/` and `commands/` file-polling (task overrides and
       fault injection, DESIGN.md sections 1b/1c). `Cell.obstruct()` /
       `clear_failure()` exist now as direct method calls but aren't
