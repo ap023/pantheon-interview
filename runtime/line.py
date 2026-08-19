@@ -252,11 +252,22 @@ class Line:
                 )
                 continue
 
-            part = self.buffers[i].pop()
+            # peek, not pop: a part is only actually removed from
+            # upstream once its cycle completes. A failed or refused
+            # attempt leaves it exactly where it was, so the same part
+            # is retried next tick instead of being silently scrapped —
+            # this is also what makes a stuck cell (obstructed, stale
+            # calibration, missing sensor — anything that keeps refusing)
+            # naturally stall everything behind it: nothing ever pops,
+            # so downstream starves and, once the upstream buffer fills,
+            # the Line stops releasing new parts too (DESIGN.md section
+            # 1a's backpressure, extended one step further).
+            part = self.buffers[i].peek()
             target_qpos = self._target_qpos_fn(cell, part)
             record = cell.run_cycle(target_qpos, part_id=part.id, variant=part.variant)
 
             if cell.done:
+                self.buffers[i].pop()
                 self.buffers[i + 1].push(part)
 
             # done is set by run_cycle in lockstep with reason ==

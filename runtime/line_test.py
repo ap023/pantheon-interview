@@ -175,12 +175,11 @@ def test_released_parts_get_sequential_ids(two_joint_mjcf_path):
 
 
 def test_release_returns_none_and_holds_the_counter_when_source_buffer_is_full(two_joint_mjcf_path):
-    # Every attempted cycle pops its part off the upstream buffer
-    # regardless of outcome (success, failure, or refusal all consume
-    # it) — so the only way the source buffer is ever actually full at
-    # release time is if something else already occupies it. Simulate
-    # that directly rather than trying to contrive it through cell
-    # dynamics.
+    # A part only leaves the upstream buffer once its cycle actually
+    # completes (peek, not pop, until done) — so the only way the source
+    # buffer is full at release time in a fresh line is if something else
+    # already occupies it. Simulate that directly rather than contriving
+    # it through cell dynamics.
     cell = make_cell("cell_a", two_joint_mjcf_path)
     line = Line(cells=[cell], trigger=noop_trigger())
     line.buffers[0].push(Part(id="stray_part", variant="default"))
@@ -246,6 +245,109 @@ def test_refusal_is_not_reported_as_over_takt(two_joint_mjcf_path):
 
     assert results[0].outcome == "refusal"
     assert results[0].over_takt is False
+
+
+# --- a stuck cell holds its part for retry instead of scrapping it ---
+
+
+def test_refused_part_is_held_for_retry_not_scrapped(two_joint_mjcf_path):
+    cell = make_cell("cell_a", two_joint_mjcf_path)
+    cell.obstruct(reason="stuck")
+    line = Line(cells=[cell], trigger=noop_trigger())
+
+    first = line.tick()  # part_000 released, then immediately refused
+    assert first[0].outcome == "refusal"
+    assert line.buffers[0].occupancy == 1  # still there, not scrapped
+
+    # Source stays blocked the whole time the stuck part occupies
+    # buffers[0] (size 1) — no new part is ever released underneath it.
+    second = line.tick()
+    assert second[0].outcome == "refusal"
+    assert line.buffers[0].occupancy == 1
+    assert line._next_part_seq == 1  # tick1's release succeeded; every one since has been blocked
+
+    cell.clear_failure()
+    third = line.tick()
+
+    assert third[0].outcome == "success"
+    assert line.buffers[0].occupancy == 0  # the same part_000, finally consumed
+    assert line._next_part_seq == 1  # release stayed blocked on every tick after the first
+
+
+def test_stuck_upstream_cell_starves_downstream_until_cleared(two_joint_mjcf_path):
+    cell_a = make_cell("cell_a", two_joint_mjcf_path)
+    cell_b = make_cell("cell_b", two_joint_mjcf_path)
+    cell_a.obstruct(reason="stuck")
+    line = Line(cells=[cell_a, cell_b], trigger=noop_trigger())
+
+    for _ in range(3):
+        a_result, b_result = line.tick()
+        assert a_result.outcome == "refusal"
+        assert b_result.ran is False
+        assert b_result.starved is True
+
+    cell_a.clear_failure()
+    a_result, b_result = line.tick()
+
+    assert a_result.outcome == "success"  # cell_a recovers with the same held part
+    assert b_result.starved is True  # still starved this same tick — one-tick lag to flow downstream
+
+
+# --- tracing a specific part's identity through the buffers, not just counts ---
+
+
+def test_a_single_part_advances_exactly_one_buffer_per_tick(two_joint_mjcf_path):
+    """Not just occupancy counts: the same part_id should show up one
+    buffer further along each tick it's actually consumed — proof the
+    Line is moving the *same* item forward, not creating/dropping parts
+    that happen to keep the counts looking right."""
+    cells = [make_cell(f"cell_{i}", two_joint_mjcf_path) for i in range(3)]
+    line = Line(cells=cells, trigger=noop_trigger())
+
+    def location_of(part_id):
+        for index, buf in enumerate(line.buffers):
+            if not buf.starved and buf.peek().id == part_id:
+                return index
+        return None
+
+    line.tick()
+    assert location_of("part_000000") == 1  # released this tick, consumed by cell_0 same tick
+
+    line.tick()
+    assert location_of("part_000000") == 2  # advanced by cell_1
+
+    line.tick()
+    assert location_of("part_000000") == 3  # advanced by cell_2 — reached the sink
+
+
+def test_full_buffer_snapshot_across_three_ticks_of_a_three_cell_line(two_joint_mjcf_path):
+    """Same idea as the test above, but checking every buffer's contents
+    at once each tick, including the effect of a cell going blocked
+    (cell_0 sits out tick 2 because buffers[1] hasn't been drained yet —
+    it doesn't get to push part_001 forward just because buffers[0] is
+    occupied)."""
+    cells = [make_cell(f"cell_{i}", two_joint_mjcf_path) for i in range(3)]
+    line = Line(cells=cells, trigger=noop_trigger())
+
+    def snapshot():
+        return [None if buf.starved else buf.peek().id for buf in line.buffers]
+
+    line.tick()
+    assert snapshot() == [None, "part_000000", None, None]
+
+    line.tick()
+    # cell_0 is blocked this tick (buffers[1] still held part_000 as of
+    # this tick's snapshot) — part_001 stays put in buffers[0] rather
+    # than advancing, while cell_1 drains part_000 into buffers[2].
+    assert snapshot() == ["part_000001", None, "part_000000", None]
+
+    line.tick()
+    # buffers[0] still holds part_001 at this tick's release (cell_0 was
+    # blocked last tick, so nothing was there to consume it) — release
+    # fails again, no part_002 yet. buffers[1] emptied last tick, so
+    # cell_0 is unblocked now and advances part_001 into it; cell_2
+    # advances part_000 from buffers[2] to the sink.
+    assert snapshot() == [None, "part_000001", None, "part_000000"]
 
 
 # --- run_shift ---

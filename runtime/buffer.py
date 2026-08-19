@@ -50,3 +50,13 @@ class Buffer:
         if self.starved:
             return None
         return self._queue.popleft()
+
+    def peek(self) -> Optional[Any]:
+        """Look at the next item without removing it, or None if starved
+        (empty). Lets a caller attempt something against the item first
+        and only actually pop() it once that attempt succeeds — an
+        upstream buffer shouldn't lose an item to a cycle that failed or
+        was refused."""
+        if self.starved:
+            return None
+        return self._queue[0]
