@@ -87,8 +87,8 @@ These aren't in `fleet_defaults.yaml`'s shape, so no YAML swap can reproduce the
 | Refusal — capability mismatch | `capable_variants` is a `Cell(...)` constructor arg, not a config field | request an unsupported `variant` via `task_input/task_{cell_id}.json` |
 | Refusal — sensor gone (pre-cycle) | `declared_sensors` is a `Cell(...)` constructor arg | construct the `Cell` with a sensor missing, or request a variant needing one it lacks |
 | Failure — logic fault (transient) | driven by `target_qpos` vs. the model's real joint range, unrelated to any fleet-config field | drop an out-of-range `target_qpos` via `task_input/task_{cell_id}.json` — see the earlier fault-tour walkthrough |
-| Failure — logic fault (systematic, N in a row) | **not built** — no consecutive-failure threshold tracking exists anywhere in the code | n/a — real gap, see `TODO.md` |
+| Failure — logic fault (systematic, N in a row) | built, but as a per-cell streak counter, not a config field | drop the same out-of-range `target_qpos` via the inbox 3 times in a row — the 4th attempt refuses with `logic_fault_systematic` on its own, no extra step needed (threshold configurable via `systematic_fault_threshold`, default 3) |
 | Failure — sensor dropout (mid-cycle) | **not built** — no simulated sensor exists that can "drop out" during a running cycle | n/a — real gap, see `TODO.md` |
 | Failure — in-cycle fault | commands-channel driven, not config | `touch commands/kill_{cell_id}.json` |
-| Failure — task outcome (clear) | **not built** — only "obstructing" exists; there's no separate "dropped outside workspace, scrapped" classification | n/a — real gap, see `TODO.md` |
+| Failure — task outcome (clear) | commands-channel driven, not config | `touch commands/drop_clear_{cell_id}.json` — one-shot failure, no halt (contrast with `obstruct`) |
 | Failure — task outcome (obstructing) | commands-channel driven, not config | `touch commands/obstruct_{cell_id}.json` |

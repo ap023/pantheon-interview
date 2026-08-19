@@ -41,24 +41,16 @@ checked off forever.
       calibration it replaced.
 - [ ] Multi-waypoint cycles (reach -> grasp -> move -> release) instead
       of a single target_qpos per `run_cycle` call.
-- [ ] DESIGN.md section 5's "logic fault (systematic)" row — no
-      consecutive-failure threshold tracking exists anywhere (e.g. "same
-      cell fails the same variant N times in a row -> stop attempting
-      that variant"). Every logic fault today is handled identically
-      (transient), regardless of how many times in a row it's happened.
-      Flagged while auditing config/test_fixtures/README.md against the
-      full failure table.
 - [ ] DESIGN.md section 5's "sensor dropout (mid-cycle)" row — no
       simulated sensor exists that can actually drop out while a cycle
       is running. `declared_sensors` is a static frozenset checked once,
       pre-cycle; there's no dynamic sensor state to interrupt mid-cycle
-      the way a kill or velocity spike can. Same audit as above.
-- [ ] DESIGN.md section 5's "task outcome (clear)" row — only
-      "obstructing" (dropped *inside* the workspace, halts the cell) is
-      built. The "clear" variant (dropped *outside* the workspace/buffer
-      bounds — logged, part scrapped/retried, no halt) has no separate
-      code path; `obstruct()` doesn't distinguish the two. Same audit as
-      above.
+      the way a kill or velocity spike can. Deliberately not attempted
+      alongside the two rows below (logic fault systematic, task outcome
+      clear) — this one needs a genuinely new stateful mechanism (a
+      live-mutable sensor set plus a per-physics-step in-loop check,
+      same shape as `kill`) that wasn't worth rushing under time
+      pressure without real testing.
 - [ ] Torque safety-violation check. Velocity is now wired in
       (`hardware_limits.max_joint_velocity`, checked every physics step);
       torque/force isn't — MuJoCo already physically clamps applied

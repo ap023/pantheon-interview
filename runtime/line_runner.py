@@ -20,8 +20,9 @@ Commands — commands/{command}_{cell_id}.json, polled once per tick at
 the boundary, consumed on read (section 1c):
 
     touch commands/clear_failure_cell_panda_001.json   # unhalt + drop active instruction -> back to default/inbox
-    touch commands/obstruct_cell_panda_001.json        # inject an obstruction
+    touch commands/obstruct_cell_panda_001.json        # inject an obstruction (halts the cell — needs clear_failure after)
     touch commands/kill_cell_panda_001.json            # mid-cycle kill (checked every physics step, not per tick; halts the cell — needs clear_failure after)
+    touch commands/drop_clear_cell_panda_001.json      # part dropped OUTSIDE the workspace (one-shot fail, no halt — contrast with obstruct)
 
 While one cell is stuck failing, watch the part flow do the right thing:
 its part never advances (peek-not-pop), its downstream neighbor finishes
@@ -185,7 +186,7 @@ def main() -> None:
     line = runner.line
     print(f"Line started: {[c.cell_id for c in line.cells]}, tick interval={args.interval}s")
     print("inbox:    task_input/task_{cell_id}.json   (consumed on read, stays active until cleared/replaced)")
-    print("commands: commands/{clear_failure|obstruct|kill}_{cell_id}.json  (consumed on read)")
+    print("commands: commands/{clear_failure|obstruct|kill|drop_clear}_{cell_id}.json  (consumed on read)")
     print(f"records:  records/runs/{line.run_id}/   (every cycle this run, in tick order)")
     print(f"          records/{{cell_id}}/{{cycle_id}}.json is the canonical copy; the above is an index into it")
     try:
