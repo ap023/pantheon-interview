@@ -82,6 +82,38 @@ Config resolver (separate from Line, separate from Cell)
 - **Cell owns** its own hardware description, calibration, readiness decision, and cycle execution. It does not own the buffer, the variant, or the config layers — it only reads from them. It also owns resolving its per-cycle Task Instruction — derived by default, overridable for testing — which is what actually gets handed to the controller, separate from Config and from Variant.
 - **Cycle/Refusal records** are the output artifact of a Cell running (or refusing) a cycle — they get written out for the dashboard and for later reproducibility, not held long-term by Cell.
 
+The same boundaries, as a graph — a Cell only ever touches its own two buffer endpoints, never a neighbor directly:
+
+```mermaid
+graph LR
+    subgraph LineBox["Line"]
+        direction TB
+        Clock["Takt Clock"]
+        VariantReg["Active Variant"]
+    end
+
+    Config["Config Resolver<br/>fleet → site → per-unit"]
+
+    SrcBuf(("Source<br/>buffer"))
+    Buf1(("Buffer"))
+    SinkBuf(("Sink"))
+
+    CellA["Cell A<br/>hardware, calibration,<br/>readiness, cycle exec"]
+    CellB["Cell B<br/>hardware, calibration,<br/>readiness, cycle exec"]
+
+    SrcBuf --> CellA --> Buf1 --> CellB --> SinkBuf
+
+    LineBox -. owns .-> SrcBuf
+    LineBox -. owns .-> Buf1
+    LineBox -. owns .-> SinkBuf
+
+    Config -. resolved config .-> CellA
+    Config -. resolved config .-> CellB
+
+    CellA -. writes .-> Records[("Cycle<br/>Records")]
+    CellB -. writes .-> Records
+```
+
 ### 1a. Buffer semantics and topology validation
 
 **Buffers, not `done` flags, are the source of truth for starved/blocked.** `done` is a single-cycle timing signal (did *this* cycle finish within takt), reset every cycle. It has no memory and doesn't reflect accumulated inventory. All cells run on the same shared takt clock, so cycles start in lockstep — a buffer doesn't let a downstream cell get ahead of an upstream neighbor's cycle timing. What it does provide is tolerance across *ticks*: if an upstream cell refuses or fails on a given tick, a downstream cell isn't necessarily starved on the very next tick, because inventory already banked from earlier successful ticks can cover it. This only works if buffer size is greater than 1 — at size 1, there's zero cushion, and any single missed tick upstream immediately starves the downstream cell on the next tick. Starved/blocked have to be read from actual buffer occupancy, not derived from `done`.

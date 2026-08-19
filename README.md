@@ -70,6 +70,16 @@ downstream neighbor finishes what it already had and then reads
 STARVED, and once the stuck cell's upstream buffer fills, the Line
 stops releasing new parts entirely.
 
+```mermaid
+flowchart LR
+    Fault["Fault injected on Cell B\n(kill / obstruct / stale calib)"] --> Refuse["Cell B refuses\nevery tick"]
+    Refuse --> Stuck["Cell B's part never advances\n(peek, not pop)"]
+    Stuck --> Starve["Cell C starves\n(nothing to pull)"]
+    Stuck --> Fill["Upstream buffer A→B fills up"]
+    Fill --> Block["Cell A goes blocked"]
+    Block --> Stop["Line stops releasing new parts"]
+```
+
 ## Look at a resolved config
 
 Prints one cell's config with, per field, which layer (fleet default /
