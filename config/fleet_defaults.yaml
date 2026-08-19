@@ -1,0 +1,11 @@
+# Fleet-wide defaults (section 2 of DESIGN.md). Site and per-unit layers
+# are not merged yet in Phase 2 — see runtime/config.py.
+takt_s: 4.0
+position_tolerance_rad: 0.05
+control_gain_kp: 4.0
+# Obstruction-clearing strategy (DESIGN.md section 1c). false = an
+# obstructing failure halts the cell until a manual clear_failure().
+autoclear: false
+# Calibration expiry threshold, in seconds (DESIGN.md section 3: refuse
+# if age + takt would cross this before the cycle finishes).
+calibration_max_age_s: 300.0

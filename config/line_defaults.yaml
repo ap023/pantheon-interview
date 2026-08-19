@@ -1,0 +1,9 @@
+# Line-wide / topology-level defaults — a separate config surface from
+# fleet_defaults.yaml. fleet_defaults.yaml describes what one cell should
+# do (takt, tolerance, gain, ...); this describes the Line itself, which
+# no single cell owns (DESIGN.md section 1a: "owned by: Line, not by
+# either neighboring Cell").
+#
+# Buffer size default: 1 (DESIGN.md section 1a) — no built-in tolerance
+# for a single missed tick between neighbors unless overridden.
+buffer_size: 1
